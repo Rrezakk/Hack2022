@@ -4,6 +4,7 @@ using System.Runtime.InteropServices.ComTypes;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Timers;
 using Hack2022;
 using Hack2022.Models;
 using Hack2022.Options;
@@ -11,6 +12,7 @@ using Hack2022.Services;
 using Hack2022.Workers;
 using Microsoft.AspNetCore.Mvc;
 using MongoDB.Driver;
+using Timer = System.Threading.Timer;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
@@ -24,6 +26,8 @@ builder.Services.Configure<EventsDBSettings>(builder.Configuration.GetSection("E
 builder.Services.AddSingleton<UserAccountsService>();
 builder.Services.AddSingleton<NotificationService>();
 builder.Services.AddSingleton<EventsService>();
+builder.Services.AddSingleton<SearchingService>();
+builder.Services.AddSingleton<BackgroundWorker>();
 
 var app = builder.Build();
 if (app.Environment.IsDevelopment())
@@ -48,22 +52,36 @@ app.MapGet("/auth/{email}/{googleId}", (string email,string googleId,UserAccount
     {
         service.CreateUser(new UserAccountModel(googleId,"user"));
     }
-    var bw = new BackgroundWorker(s, googleId);
-    bw.Run();
     return Results.Ok("user");
 });
-
+app.MapGet("/setNotifyState/{eventId}/{state}", (string eventId, bool state, EventsService service) =>
+{
+    var e = service.GetById(eventId);
+    e.notifyState = state;
+    service.Update(eventId, e);
+    return Results.Ok($"set {state} for {eventId}");
+});
 app.MapPost("/notifications/", ([FromBody] NotificationModel notification, NotificationService service) =>
 {
     Console.WriteLine($"acc: {JsonSerializer.Serialize(notification)}");
     service.CreateNotification(notification);
+    if (notification.targetTime> DateTime.Now)
+    {
+        var delay = notification.targetTime - DateTime.Now;
+        Task.Delay(delay).ContinueWith(t => service.ExecuteNotification(notification));
+    }
+    else
+    {
+        Task.Delay(0).ContinueWith(t => service.ExecuteNotification(notification));
+    }
+   
+
+    
+    //later execute
     return Results.Ok("success");
 });
-app.MapGet("/notifications/{googleId}", (string googleId,NotificationService service) =>
-{
-    return service.GetNotificationsByGoogleId(googleId);
-});
-app.MapDelete("/notifications/{notificationId}", (string notificationId, NotificationService service) =>
+app.MapGet("/notifications/{googleId}", (string googleId,NotificationService service) => service.GetNotificationsByGoogleId(googleId));
+app.MapDelete("/notifications/{notificationId}", (string? notificationId, NotificationService service) =>
 {
     service.RemoveNotificationById(notificationId);
     return $"deleted notification: {notificationId}";
@@ -77,17 +95,58 @@ app.MapPost("/events", ([FromBody] EventModel event1, EventsService service) =>
 app.MapGet("/events", (EventsService service) =>
 {
     var d = service.GetAll();
-    Console.WriteLine($"ibre: {d.Count}");
     return Results.Ok(d);
 });
 app.MapGet("/events/{eventId}", (string eventId,EventsService service) =>
 {
     return service.GetById(eventId);
 });
+app.MapGet("/eventsByTag/{tag}", (string tag, EventsService service) =>
+{
+    var events = service.GetAll();
+    var res = new List<EventModel>();
+    res.AddRange(events.FindAll(e => e.tags.Contains(tag)));
+    return res;
+});
 app.MapDelete("/event/{eventId}", (string eventId,EventsService service) =>
 {
     service.RemoveById(eventId);
     return Results.Ok("deleted");
+});
+app.MapPost("/event/{eventId}/AssignRole/{role}/{googleId}", (string role,string eventId,string googleId, EventsService service) =>
+{
+    Console.WriteLine($"{role} {eventId} {googleId}");
+    var e = service.GetById(eventId);
+    bool was = false;
+    for (int i = 0; i < e.subscribersWithRoles.Count; i++)
+    {
+        var sub  = e.subscribersWithRoles[i];
+        if(sub.googleId!=googleId)continue;
+        if (sub.role == role)
+        {
+            return Results.Ok("already exists");
+        }
+        else
+        {
+            was = true;
+            Console.WriteLine("owerriting");
+            sub.role = role;
+        }
+
+        e.subscribersWithRoles[i] = sub;
+    }
+
+    if (!was)
+    {
+        e.subscribersWithRoles.Add(new MapSubscriberEventRole(googleId,role));
+    }
+    service.Update(eventId,e);
+    return Results.Ok("nothing happened");
+
+});
+app.MapGet("/event/{eventId}/UsersWithRoles", (string eventId, EventsService service) =>
+{
+    return service.GetById(eventId).subscribersWithRoles;
 });
 
 app.MapGet("/incrementViews/{eventId}/{googleId}/{type}", (string EventId,string googleId,int type,EventsService service) =>
@@ -137,10 +196,38 @@ app.MapGet("/subscribedEvents/{googleId}", (string googleId,EventsService servic
 
     return Results.Ok(subscribed);
 });
-
-app.MapGet("/isThereAnyNotifiations/{googleId}", (string googleId, EventsService service) =>
+app.MapGet("/subscribeTag/{googleId}/{tagName}", (string googleId,string tagName,NotificationService service) => 
+    service.SubscribeTag(googleId, tagName));
+app.MapGet("/getSubscribedTags/{googleId}",
+    (string googleId, NotificationService service) =>
+    {
+        var tags = service.GetSubscribedTags(googleId);
+        return tags != null ? Results.Ok(tags) : Results.Ok(Array.Empty<string>());
+    });
+app.MapGet("/getAllTags", (EventsService service) =>
 {
-    return Results.Ok("no");
+    var events = service.GetAll().ToList();
+    var tags = events.Select(x => x.tags).ToList();
+    var set = new SortedSet<string>();
+    foreach (var t2 in tags)
+    {
+        foreach (var t in t2)
+        {
+            set.Add(t);
+        }
+    }
+
+    return set;
+});
+app.MapGet("/checkTagSubscription/{googleId}/{tagName}",
+    (string googleId, string tagName, NotificationService service) =>
+    {
+        return Results.Ok(service.CheckUserSubscribedTag(googleId, tagName));
+    });
+
+app.MapGet("/isThereAnyNotifycations/{googleId}", (string googleId, EventsService service) =>
+{
+    return Results.Ok(new List<NotificationViewModel>(){new NotificationViewModel("Митап на хакатоне","Вам предстоит встреча на хакатоне сегодня")});
 });
 
 app.MapPost("/updateEventNotifyPredelay/{eventId}/{newValue}", (string eventId,int newValue, EventsService service) =>
@@ -150,18 +237,16 @@ app.MapPost("/updateEventNotifyPredelay/{eventId}/{newValue}", (string eventId,i
     service.Update(eventId,eventModel);
 
 });
+app.MapGet("/getRole/{googleId}", (string googleId, UserAccountsService service) => service.TryGetUserById(googleId,out var user) ? user.role : "user");
 
-app.MapGet("/getRole/{googleId}", (string googleId, UserAccountsService service) =>
+app.MapGet("/getSearchTips/{searchString}", (string searchString, EventsService eventsService,SearchingService searchingService) =>
 {
-    if (service.TryGetUserById(googleId,out var user))
-    {
-        return user.role;
-    }
-
-    return "user";
+    return searchingService.GetTags(eventsService.GetAll(), searchString.ToLower());
 });
-
-//app.MapPut("/subscribeEvent/{googleId}",(string googleId,))
+app.MapGet("/getEventsBySearch/{query}", (string query,EventsService eventsService, SearchingService searchingService) =>
+{
+    return searchingService.Search(eventsService.GetAll(), query.ToLower());
+});
 app.Run();
 
 string Sha256Hash(string value)

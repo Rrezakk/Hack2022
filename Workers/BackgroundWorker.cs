@@ -6,39 +6,39 @@ namespace Hack2022.Workers
 {
     public class BackgroundWorker
     {
-        private NotificationService s;
-        private string id;
-        private bool isRunning = false;
-        public BackgroundWorker(NotificationService service,string id)
+        private readonly NotificationService _notificationService;
+        public BackgroundWorker(NotificationService notificationService)
         {
-            s = service;
-            id = id;
+            this._notificationService = notificationService;
+            Task.Run(()=> Cycle());
         }
-        public void Run()
+        private async Task Cycle()
         {
-            if (!isRunning)
+            while (true)
             {
-                Task.Run(Cycle);
-                isRunning = true;
+                ProcessNotifications();
+                Thread.Sleep(1000);
             }
         }
 
-        async Task Cycle()
+        void ProcessNotifications()
         {
-            var Date = new DateTime(DateTime.Now.Millisecond);
-            while (true)
+            Console.WriteLine("step");
+            var now = new DateTimeOffset(DateTime.UtcNow);
+            var notifications = _notificationService.GetAllNotificationsToPending();
+            foreach (var v in notifications)
             {
-               var c = s.GetNotificationsByGoogleId(id);
-                foreach (var v in c)
+                if (v.utcTimeWithOffset > now.ToUnixTimeSeconds())
                 {
-                    if (v.time > Date)
-                    {
-                        Email($"Notification: {v.Text}", "abrabokamoke@gmail.com");
-                        s.RemoveNotificationById(v.Id);
-                    }
-                }
+                    //Email($"Notification: {v.Text}", "abrabokamoke@gmail.com");
 
-                Thread.Sleep(1000);
+                    Console.WriteLine($"Expired: {v.Id} {v.Tittle} {v.Description}");
+                    var view = v.ToViewModel();
+                    Console.WriteLine($"view: {v.Id} {v.Tittle} {v.Description}");
+                    //executing notification
+
+                    _notificationService.RemoveNotificationById(v.Id);
+                }
             }
         }
         void Email(string htmlString, string mail)

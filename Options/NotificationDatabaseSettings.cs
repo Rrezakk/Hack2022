@@ -3,6 +3,7 @@
     public class NotificationDatabaseSettings
     {
         public string CollectionName { get; set; }
+        public string Collection2Name { get; set; }
         public string DatabaseName { get; set; }
         public string ConnectionString { get; set; }
     }
